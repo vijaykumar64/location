@@ -51,8 +51,8 @@ class _ServerConfigDialogState extends State<ServerConfigDialog> {
               controller: _urlController,
               decoration: const InputDecoration(
                 border: OutlineInputBorder(),
-                hintText: 'http://10.0.2.2:5000',
-                helperText: 'Emulator: 10.0.2.2:5000 | Device: LAN IP:5000',
+                hintText: 'https://location-9ql3.onrender.com',
+                helperText: 'Production: https://location-9ql3.onrender.com',
               ),
             ),
             const SizedBox(height: 18),

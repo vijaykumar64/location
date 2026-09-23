@@ -146,7 +146,15 @@ Installed exclusively on **Phone Y**.
 
 ---
 
-## ⚙️ 3. Backend (`backend/`)
+## 🌐 Live Deployed Backend
+
+The backend is deployed and live on Render:
+- **Base URL**: `https://location-9ql3.onrender.com`
+- **Health Check**: [https://location-9ql3.onrender.com/api/health](https://location-9ql3.onrender.com/api/health)
+- **Location Endpoint**: `https://location-9ql3.onrender.com/api/location`
+- **Socket.IO Endpoint**: `https://location-9ql3.onrender.com`
+
+Both `sender_app` and `receiver_app` are pre-configured to connect to this URL by default.
 
 - **Tech Stack**: Node.js, Express, Mongoose, Socket.IO, Helmet, CORS, Dotenv.
 - **Database**: Single document in the `locations` collection:

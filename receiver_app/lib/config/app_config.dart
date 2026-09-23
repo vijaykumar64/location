@@ -3,9 +3,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 class AppConfig {
   static const String _keyBaseUrl = 'receiver_backend_url';
 
-  // Default to Android emulator host loopback address
-  // For physical devices, set to your computer's local IP (e.g., http://192.168.1.10:5000)
-  static const String defaultBaseUrl = 'http://10.0.2.2:5000';
+  // Production Render deployed backend URL
+  static const String defaultBaseUrl = 'https://location-9ql3.onrender.com';
 
   static String _baseUrl = defaultBaseUrl;
 
@@ -13,7 +12,13 @@ class AppConfig {
 
   static Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
-    _baseUrl = prefs.getString(_keyBaseUrl) ?? defaultBaseUrl;
+    final savedUrl = prefs.getString(_keyBaseUrl);
+    if (savedUrl == null || savedUrl.contains('10.0.2.2') || savedUrl.contains('localhost')) {
+      _baseUrl = defaultBaseUrl;
+      await prefs.setString(_keyBaseUrl, _baseUrl);
+    } else {
+      _baseUrl = savedUrl;
+    }
   }
 
   static Future<void> setBaseUrl(String url) async {
