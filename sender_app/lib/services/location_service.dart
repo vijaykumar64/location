@@ -29,11 +29,17 @@ class LocationService extends ChangeNotifier {
   double? _longitude;
   double? _accuracy;
   DateTime? _lastUpdated;
+  DateTime? _lastGpsUpdated;
+  DateTime? _lastServerUpdated;
+  bool _isNativeServiceRunning = false;
 
   double? get latitude => _latitude;
   double? get longitude => _longitude;
   double? get accuracy => _accuracy;
   DateTime? get lastUpdated => _lastUpdated;
+  DateTime? get lastGpsUpdated => _lastGpsUpdated ?? _lastUpdated;
+  DateTime? get lastServerUpdated => _lastServerUpdated;
+  bool get isNativeServiceRunning => _isNativeServiceRunning;
 
   LocationDataModel? get lastLocation {
     if (_latitude != null && _longitude != null && _accuracy != null && _lastUpdated != null) {
@@ -105,19 +111,37 @@ class LocationService extends ChangeNotifier {
           final lng = (res['longitude'] as num?)?.toDouble();
           final acc = (res['accuracy'] as num?)?.toDouble();
           final timeMillis = (res['timestampMillis'] as num?)?.toInt();
+          final gpsMillis = (res['lastGpsMillis'] as num?)?.toInt();
+          final serverMillis = (res['lastServerMillis'] as num?)?.toInt();
+          final isRunning = res['isServiceRunning'] as bool?;
           final timeStr = res['timestamp']?.toString();
+
+          if (isRunning != null) {
+            _isNativeServiceRunning = isRunning;
+          }
 
           if (lat != null && lng != null && acc != null) {
             _latitude = lat;
             _longitude = lng;
             _accuracy = acc;
-            if (timeMillis != null && timeMillis > 0) {
+            if (gpsMillis != null && gpsMillis > 0) {
+              _lastGpsUpdated = DateTime.fromMillisecondsSinceEpoch(gpsMillis);
+              _lastUpdated = _lastGpsUpdated;
+            } else if (timeMillis != null && timeMillis > 0) {
               _lastUpdated = DateTime.fromMillisecondsSinceEpoch(timeMillis);
+              _lastGpsUpdated = _lastUpdated;
             } else if (timeStr != null) {
               _lastUpdated = DateTime.tryParse(timeStr)?.toLocal() ?? DateTime.now();
+              _lastGpsUpdated = _lastUpdated;
             } else {
               _lastUpdated = DateTime.now();
+              _lastGpsUpdated = _lastUpdated;
             }
+
+            if (serverMillis != null && serverMillis > 0) {
+              _lastServerUpdated = DateTime.fromMillisecondsSinceEpoch(serverMillis);
+            }
+
             _uploadError = null;
             notifyListeners();
           }
@@ -233,30 +257,27 @@ class LocationService extends ChangeNotifier {
   Future<void> _ensureNativeServiceRunning() async {
     if (!kIsWeb && Platform.isAndroid) {
       try {
-        final bool isRunning = await _channel.invokeMethod('isLocationServiceRunning') ?? false;
-        if (!isRunning) {
-          debugPrint('[LocationService] Starting native Android LocationForegroundService with interval ${AppConfig.updateIntervalSeconds}s');
-          await _channel.invokeMethod('startLocationService', {
-            'backend_url': AppConfig.locationApiUrl.replaceAll('/api/location', ''),
-            'interval_seconds': AppConfig.updateIntervalSeconds,
-          });
-        } else {
-          debugPrint('[LocationService] Native LocationForegroundService is already running.');
-        }
+        debugPrint('[LocationService] Ensuring native Android LocationForegroundService is running with 10s interval');
+        await _channel.invokeMethod('startLocationService', {
+          'backend_url': AppConfig.locationApiUrl.replaceAll('/api/location', ''),
+          'interval_seconds': 10,
+        });
+        _isNativeServiceRunning = true;
       } catch (e) {
         debugPrint('[LocationService] Error starting native location service: $e');
       }
     }
   }
 
-  /// Restarts the native Android service (e.g. after changing update interval or URL)
+  /// Restarts the native Android service
   Future<void> restartService() async {
     if (!kIsWeb && Platform.isAndroid) {
       try {
         await _channel.invokeMethod('startLocationService', {
           'backend_url': AppConfig.locationApiUrl.replaceAll('/api/location', ''),
-          'interval_seconds': AppConfig.updateIntervalSeconds,
+          'interval_seconds': 10,
         });
+        _isNativeServiceRunning = true;
       } catch (e) {
         debugPrint('[LocationService] restartService error: $e');
       }

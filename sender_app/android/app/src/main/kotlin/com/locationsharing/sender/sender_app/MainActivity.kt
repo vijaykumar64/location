@@ -54,6 +54,8 @@ class MainActivity : FlutterActivity() {
                     val accBits = prefs.getLong(LocationForegroundService.KEY_LAST_ACC, -1L)
                     val time = prefs.getString(LocationForegroundService.KEY_LAST_TIME, null)
                     val timeMillis = prefs.getLong(LocationForegroundService.KEY_LAST_TIME_MILLIS, -1L)
+                    val gpsMillis = prefs.getLong(LocationForegroundService.KEY_LAST_GPS_MILLIS, timeMillis)
+                    val serverMillis = prefs.getLong(LocationForegroundService.KEY_LAST_SERVER_MILLIS, -1L)
 
                     if (latBits != -1L && lngBits != -1L && accBits != -1L) {
                         val lat = java.lang.Double.longBitsToDouble(latBits)
@@ -63,13 +65,20 @@ class MainActivity : FlutterActivity() {
                         val map = mutableMapOf<String, Any>(
                             "latitude" to lat,
                             "longitude" to lng,
-                            "accuracy" to acc
+                            "accuracy" to acc,
+                            "isServiceRunning" to LocationForegroundService.isRunning
                         )
                         if (time != null) {
                             map["timestamp"] = time
                         }
                         if (timeMillis != -1L) {
                             map["timestampMillis"] = timeMillis
+                        }
+                        if (gpsMillis != -1L) {
+                            map["lastGpsMillis"] = gpsMillis
+                        }
+                        if (serverMillis != -1L) {
+                            map["lastServerMillis"] = serverMillis
                         }
                         result.success(map)
                     } else {

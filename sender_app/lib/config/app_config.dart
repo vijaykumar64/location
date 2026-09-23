@@ -12,8 +12,8 @@ class AppConfig {
   // Production Render deployed backend URL
   static const String defaultBaseUrl = 'https://location-9ql3.onrender.com';
 
-  // Default to 15 minutes per requirement, configurable down to seconds or minutes
-  static const int defaultUpdateIntervalSeconds = 15 * 60; // 900 seconds (15 minutes)
+  // Default to 10 seconds per requirement for continuous real-time updates
+  static const int defaultUpdateIntervalSeconds = 10; // 10 seconds
 
   static String _baseUrl = defaultBaseUrl;
   static int _updateIntervalSeconds = defaultUpdateIntervalSeconds;
@@ -22,6 +22,9 @@ class AppConfig {
   static String get baseUrl => _baseUrl;
   static int get updateIntervalSeconds => _updateIntervalSeconds;
   static int get updateIntervalMinutes => (_updateIntervalSeconds / 60).ceil();
+  static String get formattedInterval => _updateIntervalSeconds < 60
+      ? '${_updateIntervalSeconds}s'
+      : '$updateIntervalMinutes min';
   static bool get locationSetupCompleted => _locationSetupCompleted;
 
   static Future<void> init() async {
@@ -33,7 +36,14 @@ class AppConfig {
     } else {
       _baseUrl = savedUrl;
     }
-    _updateIntervalSeconds = prefs.getInt(_keyUpdateIntervalSec) ?? defaultUpdateIntervalSeconds;
+    final savedInterval = prefs.getInt(_keyUpdateIntervalSec);
+    if (savedInterval == null || savedInterval > 60) {
+      // Migrate legacy 15-minute default to 10 seconds
+      _updateIntervalSeconds = defaultUpdateIntervalSeconds;
+      await prefs.setInt(_keyUpdateIntervalSec, _updateIntervalSeconds);
+    } else {
+      _updateIntervalSeconds = savedInterval;
+    }
     _locationSetupCompleted = prefs.getBool(_keySetupCompleted) ?? false;
   }
 

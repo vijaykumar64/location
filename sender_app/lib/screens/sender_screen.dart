@@ -101,16 +101,22 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
     final lat = _locationService.latitude;
     final lng = _locationService.longitude;
     final acc = _locationService.accuracy;
-    final lastUpdated = _locationService.lastUpdated;
     final uploadError = _locationService.uploadError;
     final permissionError = _locationService.permissionError;
     final isBatteryRestricted = _locationService.isBatteryOptimizationRestricted;
 
+    final lastGps = _locationService.lastGpsUpdated;
+    final lastServer = _locationService.lastServerUpdated;
+    final isNativeRunning = _locationService.isNativeServiceRunning || isSharing;
+
     final latStr = lat != null ? lat.toStringAsFixed(6) : '—';
     final lngStr = lng != null ? lng.toStringAsFixed(6) : '—';
     final accStr = acc != null ? '${acc.toStringAsFixed(1)} m' : '—';
-    final lastUpdatedStr = lastUpdated != null
-        ? DateFormat('hh:mm:ss a').format(lastUpdated.toLocal())
+    final lastGpsStr = lastGps != null
+        ? DateFormat('hh:mm:ss a').format(lastGps.toLocal())
+        : '—';
+    final lastServerStr = lastServer != null
+        ? DateFormat('hh:mm:ss a').format(lastServer.toLocal())
         : '—';
 
     return Scaffold(
@@ -205,10 +211,13 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
 
               // Coordinates Details Card
               CoordinateCard(
+                updateInterval: '10 seconds',
                 latitude: latStr,
                 longitude: lngStr,
                 accuracy: accStr,
-                lastUpdated: lastUpdatedStr,
+                lastGpsUpdate: lastGpsStr,
+                lastServerUpdate: lastServerStr,
+                backgroundServiceStatus: isNativeRunning ? 'RUNNING' : 'STOPPED',
               ),
               const SizedBox(height: 16),
 
@@ -405,7 +414,7 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
               const SizedBox(height: 16),
               Center(
                 child: Text(
-                  'Interval: ${AppConfig.updateIntervalMinutes} min • Server: ${AppConfig.baseUrl}',
+                  'Update Interval: 10 seconds • Server: ${AppConfig.baseUrl}',
                   style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
                 ),
               ),

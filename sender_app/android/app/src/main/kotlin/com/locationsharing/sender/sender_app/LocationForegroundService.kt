@@ -52,9 +52,11 @@ class LocationForegroundService : Service() {
         const val KEY_LAST_ACC = "flutter.sender_last_acc"
         const val KEY_LAST_TIME = "flutter.sender_last_time"
         const val KEY_LAST_TIME_MILLIS = "flutter.sender_last_time_millis"
+        const val KEY_LAST_GPS_MILLIS = "flutter.sender_last_gps_millis"
+        const val KEY_LAST_SERVER_MILLIS = "flutter.sender_last_server_millis"
 
         const val DEFAULT_URL = "https://location-9ql3.onrender.com"
-        const val DEFAULT_INTERVAL_SECONDS = 900L // 15 minutes default
+        const val DEFAULT_INTERVAL_SECONDS = 10L // 10 seconds fixed
 
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
@@ -74,11 +76,11 @@ class LocationForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "onCreate: Initializing native Android LocationForegroundService")
+        Log.i(TAG, "[LocationService] Service started")
 
         createNotificationChannel()
 
-        // Acquire WakeLock to prevent CPU suspension during location handling
+        // Acquire WakeLock to prevent CPU suspension during background location handling
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LocationSender:ForegroundWakeLock").apply {
             setReferenceCounted(false)
@@ -94,15 +96,15 @@ class LocationForegroundService : Service() {
                 val lng = location.longitude
                 val acc = location.accuracy
 
-                Log.i(TAG, "onLocationResult received from FusedLocation: lat=$lat, lng=$lng, acc=$acc")
+                Log.i(TAG, "[LocationService] Location callback received: lat=$lat, lng=$lng, acc=$acc")
 
                 val nowMillis = System.currentTimeMillis()
                 val nowStr = getIsoUtcString(Date(nowMillis))
 
-                // 1. Save latest location to SharedPreferences for the Flutter UI
-                saveLocationLocally(lat, lng, acc.toDouble(), nowStr, nowMillis)
+                // 1. Save latest coordinates and GPS timestamp to SharedPreferences
+                saveGpsLocationLocally(lat, lng, acc.toDouble(), nowStr, nowMillis)
 
-                // 2. Transmit coordinates via native HTTP POST
+                // 2. Transmit coordinates via native HTTP POST directly to Node.js backend
                 serviceScope.launch {
                     sendLocationToBackend(lat, lng, acc.toDouble())
                 }
@@ -114,16 +116,16 @@ class LocationForegroundService : Service() {
         val action = intent?.action ?: ACTION_START
 
         if (action == ACTION_STOP) {
-            Log.i(TAG, "onStartCommand: ACTION_STOP received. Stopping service.")
+            Log.i(TAG, "[LocationService] ACTION_STOP received. Stopping service.")
             stopSelf()
             return START_NOT_STICKY
         }
 
-        Log.i(TAG, "onStartCommand: Starting native foreground service")
+        Log.i(TAG, "[LocationService] Starting native foreground service (10s interval)")
         isRunning = true
 
         // Promote to foreground service immediately with persistent notification
-        val notification = buildNotification("Your location is being shared in the background.")
+        val notification = buildNotification("Your location is being shared in the background.\nUpdates every 10 seconds.")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         } else {
@@ -137,7 +139,7 @@ class LocationForegroundService : Service() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_IS_ACTIVE, true).apply()
 
-        // Request location updates from Android FusedLocationProviderClient
+        // Request location updates from Android FusedLocationProviderClient every 10s
         requestLocationUpdates()
 
         // START_STICKY tells Android to recreate the service if memory pressure killed it
@@ -146,14 +148,21 @@ class LocationForegroundService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        Log.i(TAG, "onTaskRemoved: Flutter Activity cleared from Recent Apps. Service continues running independently!")
-        // DO NOT call stopSelf(). The foreground service remains active.
+        Log.i(TAG, "[LocationService] onTaskRemoved: Recent Apps cleared. Foreground service remains active and continuing 10s updates!")
+        // Re-affirm foreground notification and continuous updates
+        val notification = buildNotification("Your location is being shared in the background.\nUpdates every 10 seconds.")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+        requestLocationUpdates()
     }
 
     private fun requestLocationUpdates() {
         try {
-            val intervalMs = (intervalSeconds * 1000L).coerceAtLeast(5000L)
-            val minIntervalMs = (intervalMs / 2).coerceAtLeast(3000L)
+            val intervalMs = 10000L // 10 seconds
+            val minIntervalMs = 10000L // 10 seconds
 
             val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, intervalMs).apply {
                 setMinUpdateIntervalMillis(minIntervalMs)
@@ -163,24 +172,24 @@ class LocationForegroundService : Service() {
 
             fusedLocationClient.removeLocationUpdates(locationCallback)
             fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
-            Log.i(TAG, "FusedLocationProvider updates requested with interval: ${intervalSeconds}s")
+            Log.i(TAG, "[LocationService] FusedLocationProvider updates requested with interval: 10s")
 
             // Also request last known location immediately
             fusedLocationClient.lastLocation.addOnSuccessListener { loc ->
                 if (loc != null) {
-                    Log.i(TAG, "Initial lastLocation acquired: ${loc.latitude}, ${loc.longitude}")
                     val nowMillis = System.currentTimeMillis()
                     val nowStr = getIsoUtcString(Date(nowMillis))
-                    saveLocationLocally(loc.latitude, loc.longitude, loc.accuracy.toDouble(), nowStr, nowMillis)
+                    Log.i(TAG, "[LocationService] Initial lastLocation acquired: lat=${loc.latitude}, lng=${loc.longitude}, acc=${loc.accuracy}")
+                    saveGpsLocationLocally(loc.latitude, loc.longitude, loc.accuracy.toDouble(), nowStr, nowMillis)
                     serviceScope.launch {
                         sendLocationToBackend(loc.latitude, loc.longitude, loc.accuracy.toDouble())
                     }
                 }
             }
         } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException requesting location updates: ${e.message}")
+            Log.e(TAG, "[LocationService] SecurityException requesting location updates: ${e.message}")
         } catch (e: Exception) {
-            Log.e(TAG, "Exception requesting location updates: ${e.message}")
+            Log.e(TAG, "[LocationService] Exception requesting location updates: ${e.message}")
         }
     }
 
@@ -195,7 +204,6 @@ class LocationForegroundService : Service() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
         val intentUrl = intent?.getStringExtra("backend_url")
-        val intentInterval = intent?.getLongExtra("interval_seconds", -1L) ?: -1L
 
         backendUrl = when {
             !intentUrl.isNullOrBlank() -> intentUrl
@@ -203,16 +211,18 @@ class LocationForegroundService : Service() {
             else -> DEFAULT_URL
         }.trim().trimEnd('/')
 
-        intervalSeconds = when {
-            intentInterval > 0 -> intentInterval
-            prefs.contains(KEY_INTERVAL) -> prefs.getLong(KEY_INTERVAL, DEFAULT_INTERVAL_SECONDS)
-            else -> DEFAULT_INTERVAL_SECONDS
+        intervalSeconds = DEFAULT_INTERVAL_SECONDS
+
+        prefs.edit().apply {
+            putString(KEY_URL, backendUrl)
+            putLong(KEY_INTERVAL, intervalSeconds)
+            apply()
         }
 
-        Log.i(TAG, "Configuration loaded: url=$backendUrl, interval=${intervalSeconds}s")
+        Log.i(TAG, "[LocationService] Configuration loaded: url=$backendUrl, interval=${intervalSeconds}s")
     }
 
-    private fun saveLocationLocally(lat: Double, lng: Double, acc: Double, timestampIso: String, timestampMillis: Long) {
+    private fun saveGpsLocationLocally(lat: Double, lng: Double, acc: Double, timestampIso: String, timestampMillis: Long) {
         try {
             val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().apply {
@@ -221,10 +231,20 @@ class LocationForegroundService : Service() {
                 putLong(KEY_LAST_ACC, java.lang.Double.doubleToRawLongBits(acc))
                 putString(KEY_LAST_TIME, timestampIso)
                 putLong(KEY_LAST_TIME_MILLIS, timestampMillis)
+                putLong(KEY_LAST_GPS_MILLIS, timestampMillis)
                 apply()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error saving location to SharedPreferences: ${e.message}")
+            Log.e(TAG, "[LocationService] Error saving location to SharedPreferences: ${e.message}")
+        }
+    }
+
+    private fun saveServerUpdateTime(serverMillis: Long) {
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putLong(KEY_LAST_SERVER_MILLIS, serverMillis).apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "[LocationService] Error saving server update time: ${e.message}")
         }
     }
 
@@ -232,14 +252,14 @@ class LocationForegroundService : Service() {
         val endpoint = "$backendUrl/api/location"
         var connection: HttpURLConnection? = null
         try {
-            Log.d(TAG, "Sending HTTP POST to $endpoint: lat=$latitude, lng=$longitude, acc=$accuracy")
+            Log.i(TAG, "[LocationService] Sending location to backend: lat=$latitude, lng=$longitude, acc=$accuracy")
             val url = URL(endpoint)
             connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
             connection.setRequestProperty("Content-Type", "application/json")
             connection.setRequestProperty("Accept", "application/json")
-            connection.connectTimeout = 15000
-            connection.readTimeout = 15000
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
             connection.doOutput = true
 
             val jsonBody = JSONObject().apply {
@@ -254,13 +274,18 @@ class LocationForegroundService : Service() {
             }
 
             val responseCode = connection.responseCode
-            Log.i(TAG, "HTTP response code: $responseCode from $endpoint")
             if (responseCode in 200..299) {
-                val timeStr = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-                updateNotification("Your location is being shared in the background. (Last updated: $timeStr)")
+                val nowServerMillis = System.currentTimeMillis()
+                saveServerUpdateTime(nowServerMillis)
+                Log.i(TAG, "[LocationService] Backend update successful (HTTP $responseCode)")
+                Log.i(TAG, "[LocationService] Next location update expected in 10s")
+                val timeStr = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(nowServerMillis))
+                updateNotification("Your location is being shared in the background. Updates every 10 seconds. (Last: $timeStr)")
+            } else {
+                Log.w(TAG, "[LocationService] Backend update returned HTTP $responseCode")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to send location to backend: ${e.message}. Will retry on next location update.")
+            Log.w(TAG, "[LocationService] Failed to send location to backend: ${e.message}. Will retry on next 10s callback.")
         } finally {
             connection?.disconnect()
         }
@@ -291,8 +316,9 @@ class LocationForegroundService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Location sharing is active")
+            .setContentTitle("Location Sharing Active")
             .setContentText(bodyText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bodyText))
             .setSmallIcon(applicationInfo.icon)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
