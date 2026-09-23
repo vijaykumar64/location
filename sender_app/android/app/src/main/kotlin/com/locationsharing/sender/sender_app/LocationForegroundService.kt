@@ -51,6 +51,7 @@ class LocationForegroundService : Service() {
         const val KEY_LAST_LNG = "flutter.sender_last_lng"
         const val KEY_LAST_ACC = "flutter.sender_last_acc"
         const val KEY_LAST_TIME = "flutter.sender_last_time"
+        const val KEY_LAST_TIME_MILLIS = "flutter.sender_last_time_millis"
 
         const val DEFAULT_URL = "https://location-9ql3.onrender.com"
         const val DEFAULT_INTERVAL_SECONDS = 900L // 15 minutes default
@@ -95,10 +96,11 @@ class LocationForegroundService : Service() {
 
                 Log.i(TAG, "onLocationResult received from FusedLocation: lat=$lat, lng=$lng, acc=$acc")
 
-                val nowStr = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).format(Date())
+                val nowMillis = System.currentTimeMillis()
+                val nowStr = getIsoUtcString(Date(nowMillis))
 
                 // 1. Save latest location to SharedPreferences for the Flutter UI
-                saveLocationLocally(lat, lng, acc.toDouble(), nowStr)
+                saveLocationLocally(lat, lng, acc.toDouble(), nowStr, nowMillis)
 
                 // 2. Transmit coordinates via native HTTP POST
                 serviceScope.launch {
@@ -167,8 +169,9 @@ class LocationForegroundService : Service() {
             fusedLocationClient.lastLocation.addOnSuccessListener { loc ->
                 if (loc != null) {
                     Log.i(TAG, "Initial lastLocation acquired: ${loc.latitude}, ${loc.longitude}")
-                    val nowStr = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).format(Date())
-                    saveLocationLocally(loc.latitude, loc.longitude, loc.accuracy.toDouble(), nowStr)
+                    val nowMillis = System.currentTimeMillis()
+                    val nowStr = getIsoUtcString(Date(nowMillis))
+                    saveLocationLocally(loc.latitude, loc.longitude, loc.accuracy.toDouble(), nowStr, nowMillis)
                     serviceScope.launch {
                         sendLocationToBackend(loc.latitude, loc.longitude, loc.accuracy.toDouble())
                     }
@@ -179,6 +182,13 @@ class LocationForegroundService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Exception requesting location updates: ${e.message}")
         }
+    }
+
+    private fun getIsoUtcString(date: Date): String {
+        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }
+        return sdf.format(date)
     }
 
     private fun loadConfig(intent: Intent?) {
@@ -202,7 +212,7 @@ class LocationForegroundService : Service() {
         Log.i(TAG, "Configuration loaded: url=$backendUrl, interval=${intervalSeconds}s")
     }
 
-    private fun saveLocationLocally(lat: Double, lng: Double, acc: Double, timestampIso: String) {
+    private fun saveLocationLocally(lat: Double, lng: Double, acc: Double, timestampIso: String, timestampMillis: Long) {
         try {
             val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().apply {
@@ -210,6 +220,7 @@ class LocationForegroundService : Service() {
                 putLong(KEY_LAST_LNG, java.lang.Double.doubleToRawLongBits(lng))
                 putLong(KEY_LAST_ACC, java.lang.Double.doubleToRawLongBits(acc))
                 putString(KEY_LAST_TIME, timestampIso)
+                putLong(KEY_LAST_TIME_MILLIS, timestampMillis)
                 apply()
             }
         } catch (e: Exception) {

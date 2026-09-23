@@ -110,7 +110,7 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
     final lngStr = lng != null ? lng.toStringAsFixed(6) : '—';
     final accStr = acc != null ? '${acc.toStringAsFixed(1)} m' : '—';
     final lastUpdatedStr = lastUpdated != null
-        ? DateFormat('hh:mm a').format(lastUpdated.toLocal())
+        ? DateFormat('hh:mm:ss a').format(lastUpdated.toLocal())
         : '—';
 
     return Scaffold(

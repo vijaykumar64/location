@@ -104,13 +104,20 @@ class LocationService extends ChangeNotifier {
           final lat = (res['latitude'] as num?)?.toDouble();
           final lng = (res['longitude'] as num?)?.toDouble();
           final acc = (res['accuracy'] as num?)?.toDouble();
+          final timeMillis = (res['timestampMillis'] as num?)?.toInt();
           final timeStr = res['timestamp']?.toString();
 
-          if (lat != null && lng != null && acc != null && timeStr != null) {
+          if (lat != null && lng != null && acc != null) {
             _latitude = lat;
             _longitude = lng;
             _accuracy = acc;
-            _lastUpdated = DateTime.tryParse(timeStr) ?? DateTime.now();
+            if (timeMillis != null && timeMillis > 0) {
+              _lastUpdated = DateTime.fromMillisecondsSinceEpoch(timeMillis);
+            } else if (timeStr != null) {
+              _lastUpdated = DateTime.tryParse(timeStr)?.toLocal() ?? DateTime.now();
+            } else {
+              _lastUpdated = DateTime.now();
+            }
             _uploadError = null;
             notifyListeners();
           }
