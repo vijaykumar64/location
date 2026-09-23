@@ -31,6 +31,7 @@ class _ServerConfigDialogState extends State<ServerConfigDialog> {
   }
 
   String _formatInterval(int sec) {
+    if (sec == 900) return '15 min (Default)';
     if (sec < 60) return '${sec}s (Continuous)';
     final mins = (sec / 60).round();
     return '$mins min${mins > 1 ? 's' : ''}';

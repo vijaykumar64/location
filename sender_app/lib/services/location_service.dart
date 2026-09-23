@@ -1,35 +1,50 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:geolocator/geolocator.dart';
 import '../config/app_config.dart';
 import '../models/location_data.dart';
-import 'api_service.dart';
+import 'background_service.dart';
 
 enum SharingStatus {
-  idle,
+  initializing,
   active,
   gpsDisabled,
-  permissionDenied,
+  permissionRequired,
   permissionPermanentlyDenied,
 }
 
 class LocationService extends ChangeNotifier {
   static final LocationService _instance = LocationService._internal();
   factory LocationService() => _instance;
-  LocationService._internal() {
-    _initServiceListener();
-  }
+  LocationService._internal();
 
-  SharingStatus _status = SharingStatus.idle;
+  SharingStatus _status = SharingStatus.initializing;
   SharingStatus get status => _status;
   bool get isSharing => _status == SharingStatus.active;
 
-  Position? _currentPosition;
-  Position? get currentPosition => _currentPosition;
+  double? _latitude;
+  double? _longitude;
+  double? _accuracy;
+  DateTime? _lastUpdated;
 
-  LocationDataModel? _lastUploadedLocation;
-  LocationDataModel? get lastUploadedLocation => _lastUploadedLocation;
+  double? get latitude => _latitude;
+  double? get longitude => _longitude;
+  double? get accuracy => _accuracy;
+  DateTime? get lastUpdated => _lastUpdated;
+
+  LocationDataModel? get lastLocation {
+    if (_latitude != null && _longitude != null && _accuracy != null && _lastUpdated != null) {
+      return LocationDataModel(
+        latitude: _latitude!,
+        longitude: _longitude!,
+        accuracy: _accuracy!,
+        timestamp: _lastUpdated!,
+      );
+    }
+    return null;
+  }
 
   String? _uploadError;
   String? get uploadError => _uploadError;
@@ -40,18 +55,29 @@ class LocationService extends ChangeNotifier {
   bool _isGpsEnabled = true;
   bool get isGpsEnabled => _isGpsEnabled;
 
-  LocationPermission _permission = LocationPermission.denied;
-  LocationPermission get permission => _permission;
+  bool _isBatteryOptimizationRestricted = false;
+  bool get isBatteryOptimizationRestricted => _isBatteryOptimizationRestricted;
 
-  bool _isUploading = false;
-  bool get isUploading => _isUploading;
-
-  StreamSubscription<Position>? _positionStreamSubscription;
   StreamSubscription<ServiceStatus>? _serviceStatusSubscription;
-  Timer? _periodicTimer;
 
-  void _initServiceListener() {
+  /// Initializes the service on app launch
+  Future<void> initialize() async {
+    // 1. Load cached coordinates from local storage for instant display
+    final cached = await AppConfig.getLastLocation();
+    if (cached != null) {
+      _latitude = cached['latitude'];
+      _longitude = cached['longitude'];
+      _accuracy = cached['accuracy'];
+      _lastUpdated = cached['timestamp'];
+    }
+
+    // 2. Register background isolate message receiver
+    FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
+    FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
+
+    // 3. Listen to device GPS hardware switch (on/off)
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+      _serviceStatusSubscription?.cancel();
       _serviceStatusSubscription = Geolocator.getServiceStatusStream().listen((ServiceStatus status) {
         _isGpsEnabled = (status == ServiceStatus.enabled);
         if (!_isGpsEnabled && _status == SharingStatus.active) {
@@ -59,201 +85,210 @@ class LocationService extends ChangeNotifier {
           _uploadError = 'Location services (GPS) disabled on device.';
           notifyListeners();
         } else if (_isGpsEnabled && _status == SharingStatus.gpsDisabled) {
-          startTracking();
+          checkAndAutoStart();
         }
       });
     }
+
+    // 4. Check battery optimization state
+    await checkBatteryOptimization();
+
+    // 5. Check permissions and auto-start if already granted
+    await checkAndAutoStart();
   }
 
-  /// 1. Check whether location services are enabled
-  Future<bool> checkLocationServiceEnabled() async {
+  void _onReceiveTaskData(dynamic data) {
+    if (data is Map) {
+      debugPrint('[LocationService] Received data from background isolate: $data');
+      if (data['success'] == true) {
+        _latitude = (data['latitude'] as num?)?.toDouble() ?? _latitude;
+        _longitude = (data['longitude'] as num?)?.toDouble() ?? _longitude;
+        _accuracy = (data['accuracy'] as num?)?.toDouble() ?? _accuracy;
+        if (data['timestamp'] != null) {
+          _lastUpdated = DateTime.tryParse(data['timestamp'].toString()) ?? DateTime.now();
+        }
+        _uploadError = null;
+        _status = SharingStatus.active;
+      } else {
+        _uploadError = data['error']?.toString();
+      }
+      notifyListeners();
+    }
+  }
+
+  /// Checks battery optimization status on Android
+  Future<void> checkBatteryOptimization() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      final isIgnoring = await FlutterForegroundTask.isIgnoringBatteryOptimizations;
+      _isBatteryOptimizationRestricted = !isIgnoring;
+      notifyListeners();
+    }
+  }
+
+  /// Requests user to whitelist app from aggressive battery optimizations
+  Future<void> requestIgnoreBatteryOptimization() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+      await Future.delayed(const Duration(seconds: 1));
+      await checkBatteryOptimization();
+    }
+  }
+
+  /// Checks existing permissions and automatically starts/reconnects the foreground service
+  Future<void> checkAndAutoStart() async {
     _isGpsEnabled = await Geolocator.isLocationServiceEnabled();
     if (!_isGpsEnabled) {
       _status = SharingStatus.gpsDisabled;
       _permissionError = 'Location services are disabled on your device. Please turn on GPS.';
       notifyListeners();
-      return false;
-    }
-    return true;
-  }
-
-  /// 2. Request location permission with proper status handling
-  Future<LocationPermission> requestPermission() async {
-    _permission = await Geolocator.checkPermission();
-
-    if (_permission == LocationPermission.denied) {
-      _permission = await Geolocator.requestPermission();
+      return;
     }
 
-    if (_permission == LocationPermission.denied) {
-      _status = SharingStatus.permissionDenied;
-      _permissionError = 'Location permission is required to share your coordinates with Y.';
+    final permission = await Geolocator.checkPermission();
+
+    if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+      // Permissions are already granted: DO NOT ask again!
+      _permissionError = null;
+      await _ensureForegroundServiceRunning();
+      _status = SharingStatus.active;
       notifyListeners();
-      return _permission;
+      return;
     }
 
-    if (_permission == LocationPermission.deniedForever) {
+    if (permission == LocationPermission.deniedForever) {
       _status = SharingStatus.permissionPermanentlyDenied;
       _permissionError = 'Location permissions are permanently denied. Please enable them in App Settings.';
       notifyListeners();
-      return _permission;
+      return;
     }
 
-    _permissionError = null;
+    // Permission not granted yet (first installation or revoked)
+    _status = SharingStatus.permissionRequired;
     notifyListeners();
-    return _permission;
   }
 
-  /// 3. Get current location once
-  Future<Position?> getCurrentLocation() async {
+  /// Performs first-time permission requests and automatically begins background sharing
+  Future<bool> requestPermissionsAndStart() async {
+    _isGpsEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!_isGpsEnabled) {
+      _status = SharingStatus.gpsDisabled;
+      notifyListeners();
+      return false;
+    }
+
+    // 1. Request Notification permission on Android 13+
+    if (!kIsWeb && Platform.isAndroid) {
+      final notifStatus = await FlutterForegroundTask.checkNotificationPermission();
+      if (notifStatus != NotificationPermission.granted) {
+        await FlutterForegroundTask.requestNotificationPermission();
+      }
+    }
+
+    // 2. Request Location Permission
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.denied) {
+      _status = SharingStatus.permissionRequired;
+      _permissionError = 'Location permission is required to share your coordinates with Receiver Y.';
+      notifyListeners();
+      return false;
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      _status = SharingStatus.permissionPermanentlyDenied;
+      _permissionError = 'Location permissions are permanently denied. Please enable them in App Settings.';
+      notifyListeners();
+      return false;
+    }
+
+    // 3. Mark setup completed so subsequent launches never prompt again
+    await AppConfig.setLocationSetupCompleted(true);
+
+    // 4. Start foreground service
+    await _ensureForegroundServiceRunning();
+    _status = SharingStatus.active;
+    _permissionError = null;
+    notifyListeners();
+
+    // 5. Fetch first immediate coordinates
     try {
-      final position = await Geolocator.getCurrentPosition(
+      final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.high,
           timeLimit: Duration(seconds: 10),
         ),
       );
-      _currentPosition = position;
+      _latitude = pos.latitude;
+      _longitude = pos.longitude;
+      _accuracy = pos.accuracy;
+      _lastUpdated = DateTime.now();
+      await AppConfig.saveLastLocation(
+        latitude: pos.latitude,
+        longitude: pos.longitude,
+        accuracy: pos.accuracy,
+        timestamp: _lastUpdated!,
+      );
       notifyListeners();
-      return position;
     } catch (e) {
-      debugPrint('[LocationService] getCurrentLocation error: $e');
-      return null;
+      debugPrint('[LocationService] Initial position acquire error: $e');
     }
-  }
-
-  /// 4. Start continuous tracking and real-time location sharing without break
-  Future<bool> startTracking() async {
-    // Step 1: Check location services enabled
-    final serviceEnabled = await checkLocationServiceEnabled();
-    if (!serviceEnabled) return false;
-
-    // Step 2: Request permission
-    final perm = await requestPermission();
-    if (perm != LocationPermission.always && perm != LocationPermission.whileInUse) {
-      return false;
-    }
-
-    _status = SharingStatus.active;
-    _uploadError = null;
-    _permissionError = null;
-    notifyListeners();
-
-    // Trigger immediate location capture and upload
-    await _captureAndUploadLocation();
-
-    final intervalSec = AppConfig.updateIntervalSeconds;
-
-    // Android foreground service settings for uninterrupted real-time streaming
-    late LocationSettings locationSettings;
-    if (!kIsWeb && Platform.isAndroid) {
-      locationSettings = AndroidSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 0, // 0 meters so continuous updates are sent even when stationary
-        intervalDuration: Duration(seconds: intervalSec),
-        foregroundNotificationConfig: ForegroundNotificationConfig(
-          notificationTitle: "Continuous Location Sharing Active",
-          notificationText: "Real-time updates sending every $intervalSec sec without break.",
-          enableWakeLock: true, // Prevents CPU sleep
-        ),
-      );
-    } else {
-      locationSettings = LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 0,
-        timeLimit: const Duration(seconds: 15),
-      );
-    }
-
-    // Subscribe to continuous position stream with foreground notification
-    _positionStreamSubscription?.cancel();
-    _positionStreamSubscription = Geolocator.getPositionStream(
-      locationSettings: locationSettings,
-    ).listen(
-      (Position position) async {
-        if (_status != SharingStatus.active) return;
-        _currentPosition = position;
-        await _uploadPosition(position);
-      },
-      onError: (error) {
-        debugPrint('[LocationService] Stream error: $error');
-      },
-    );
-
-    // Periodic backup timer to ensure continuous sending without break even if stream stalls
-    _periodicTimer?.cancel();
-    _periodicTimer = Timer.periodic(Duration(seconds: intervalSec), (_) async {
-      if (_status == SharingStatus.active && !_isUploading) {
-        await _captureAndUploadLocation();
-      }
-    });
 
     return true;
   }
 
-  /// Helper: Capture GPS location and attempt upload
-  Future<void> _captureAndUploadLocation() async {
-    if (_isUploading) return;
-    _isUploading = true;
-    notifyListeners();
+  /// Configures and starts the native Android Foreground Service
+  Future<void> _ensureForegroundServiceRunning() async {
+    final intervalMs = AppConfig.updateIntervalSeconds * 1000;
 
-    try {
-      final position = await getCurrentLocation();
-      if (position != null) {
-        await _uploadPosition(position);
-      } else {
-        _uploadError = 'Unable to acquire GPS signal.';
-      }
-    } catch (e) {
-      _uploadError = e.toString();
-    } finally {
-      _isUploading = false;
-      notifyListeners();
-    }
-  }
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'location_sharing_channel',
+        channelName: 'Location Sharing Active',
+        channelDescription: 'Persistent background location sharing for Sender X',
+        channelImportance: NotificationChannelImportance.DEFAULT,
+        priority: NotificationPriority.DEFAULT,
+        enableVibration: false,
+        playSound: false,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(
+        showNotification: true,
+        playSound: false,
+      ),
+      foregroundTaskOptions: ForegroundTaskOptions(
+        eventAction: ForegroundTaskEventAction.repeat(intervalMs),
+        autoRunOnBoot: true,
+        autoRunOnMyPackageReplaced: true,
+        allowWakeLock: true,
+        allowWifiLock: true,
+      ),
+    );
 
-  /// Helper: Upload position to backend
-  Future<void> _uploadPosition(Position position) async {
-    try {
-      final uploaded = await ApiService.uploadLocation(
-        latitude: position.latitude,
-        longitude: position.longitude,
-        accuracy: position.accuracy,
+    final isRunning = await FlutterForegroundTask.isRunningService;
+    if (!isRunning) {
+      debugPrint('[LocationService] Starting native Android ForegroundService with interval ${AppConfig.updateIntervalSeconds}s');
+      await FlutterForegroundTask.startService(
+        serviceId: 256,
+        notificationTitle: 'Location sharing is active',
+        notificationText: 'Your location is being shared in the background.',
+        callback: startCallback,
       );
-      _lastUploadedLocation = uploaded;
-      _uploadError = null; // Cleared on successful upload
-      notifyListeners();
-    } on ApiException catch (e) {
-      _uploadError = e.message;
-      notifyListeners();
-    } catch (e) {
-      _uploadError = 'Upload failed: $e';
-      notifyListeners();
+    } else {
+      debugPrint('[LocationService] Foreground service already running; restarting with latest config...');
+      await FlutterForegroundTask.restartService();
     }
   }
 
-  /// 5. Stop tracking and all backend updates
-  Future<void> stopTracking() async {
-    _positionStreamSubscription?.cancel();
-    _positionStreamSubscription = null;
-
-    _periodicTimer?.cancel();
-    _periodicTimer = null;
-
-    _status = SharingStatus.idle;
-    _uploadError = null;
-    notifyListeners();
-  }
-
-  /// Restart tracking (used when interval is changed in settings while sharing is active)
-  Future<void> restartTracking() async {
-    if (isSharing) {
-      await stopTracking();
-      await startTracking();
+  /// Restarts foreground service (e.g. after changing update interval)
+  Future<void> restartService() async {
+    if (_status == SharingStatus.active) {
+      await _ensureForegroundServiceRunning();
     }
   }
 
-  /// Device settings helpers
+  /// Device settings shortcuts
   Future<void> openLocationSettings() async {
     await Geolocator.openLocationSettings();
   }
@@ -265,7 +300,7 @@ class LocationService extends ChangeNotifier {
   @override
   void dispose() {
     _serviceStatusSubscription?.cancel();
-    stopTracking();
+    FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
     super.dispose();
   }
 }

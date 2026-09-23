@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:geolocator/geolocator.dart';
 import '../config/app_config.dart';
 import '../services/location_service.dart';
 import '../widgets/status_badge.dart';
@@ -16,20 +15,32 @@ class SenderScreen extends StatefulWidget {
 
 class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver {
   final LocationService _locationService = LocationService();
+  bool _hasPromptedPermissionOnLaunch = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _locationService.addListener(_onServiceUpdate);
+
+    // Initialize service and check if first-time permission prompt is needed
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _locationService.initialize();
+      if (!mounted) return;
+
+      if (_locationService.status == SharingStatus.permissionRequired &&
+          !_hasPromptedPermissionOnLaunch) {
+        _hasPromptedPermissionOnLaunch = true;
+        _showInitialPermissionFlow();
+      }
+    });
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      if (_locationService.isSharing) {
-        _locationService.checkLocationServiceEnabled();
-      }
+      _locationService.checkAndAutoStart();
+      _locationService.checkBatteryOptimization();
     }
   }
 
@@ -44,67 +55,20 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
     if (mounted) setState(() {});
   }
 
-  void _handleStartSharing() async {
-    // 1. Check if location services (GPS) are on
-    final gpsOn = await _locationService.checkLocationServiceEnabled();
-    if (!gpsOn) {
-      if (!mounted) return;
-      _showGpsDisabledDialog();
-      return;
-    }
-
-    // 2. Explain why location is needed before asking
-    final permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      if (!mounted) return;
-      final proceed = await _showPermissionRationaleDialog();
-      if (!proceed) return;
-    }
-
-    // 3. Start tracking
-    final started = await _locationService.startTracking();
-    if (!started && mounted) {
-      if (_locationService.status == SharingStatus.permissionPermanentlyDenied) {
-        _showPermanentlyDeniedDialog();
-      } else if (_locationService.status == SharingStatus.permissionDenied) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Location permission is required to start sharing.'),
-            backgroundColor: Colors.redAccent,
-          ),
-        );
-      }
-    }
-  }
-
-  void _handleStopSharing() async {
-    await _locationService.stopTracking();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Location sharing stopped.'),
-          backgroundColor: Colors.blueGrey,
-        ),
-      );
-    }
-  }
-
-  Future<bool> _showPermissionRationaleDialog() async {
-    return await showDialog<bool>(
+  /// First installation onboarding flow: Explains purpose and requests permissions
+  Future<void> _showInitialPermissionFlow() async {
+    final proceed = await showDialog<bool>(
           context: context,
           barrierDismissible: false,
           builder: (ctx) => AlertDialog(
-            title: const Text('Location Access Required'),
+            title: const Text('Background Location Access'),
             content: const Text(
-              'This Sender app shares your real-time coordinates with Phone Y.\n\n'
-              'GPS location access is strictly used to obtain your current position and '
-              'transmit it to the designated receiver while sharing is active.',
+              'This application continuously shares your location with Receiver Y in the background.\n\n'
+              'Android location permission is required so the service can continue updating your '
+              'coordinates even when the app is minimized or closed.\n\n'
+              'A persistent Android notification will clearly show that background sharing is active.',
             ),
             actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('Cancel'),
-              ),
               FilledButton(
                 onPressed: () => Navigator.of(ctx).pop(true),
                 child: const Text('Continue'),
@@ -113,56 +77,10 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
           ),
         ) ??
         false;
-  }
 
-  void _showGpsDisabledDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Device Location Disabled'),
-        content: const Text(
-          'GPS location services are turned off on this device. Please turn on device location to begin sharing.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Dismiss'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              _locationService.openLocationSettings();
-            },
-            child: const Text('Open Settings'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showPermanentlyDeniedDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Permission Permanently Denied'),
-        content: const Text(
-          'Location permission has been permanently denied. Please grant location permissions in Android App Settings to use this app.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              _locationService.openAppSettings();
-            },
-            child: const Text('Open App Settings'),
-          ),
-        ],
-      ),
-    );
+    if (proceed && mounted) {
+      await _locationService.requestPermissionsAndStart();
+    }
   }
 
   void _openConfigDialog() async {
@@ -171,35 +89,28 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
       builder: (_) => const ServerConfigDialog(),
     );
     if (updated == true && mounted) {
-      if (_locationService.isSharing) {
-        await _locationService.restartTracking();
-      }
+      await _locationService.restartService();
       setState(() {});
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final status = _locationService.status;
     final isSharing = _locationService.isSharing;
-    final position = _locationService.currentPosition;
-    final uploaded = _locationService.lastUploadedLocation;
+    final lat = _locationService.latitude;
+    final lng = _locationService.longitude;
+    final acc = _locationService.accuracy;
+    final lastUpdated = _locationService.lastUpdated;
     final uploadError = _locationService.uploadError;
     final permissionError = _locationService.permissionError;
+    final isBatteryRestricted = _locationService.isBatteryOptimizationRestricted;
 
-    // Use latest available coordinates (either uploaded or from GPS)
-    final latStr = position != null
-        ? position.latitude.toStringAsFixed(6)
-        : (uploaded != null ? uploaded.latitude.toStringAsFixed(6) : '—');
-    final lngStr = position != null
-        ? position.longitude.toStringAsFixed(6)
-        : (uploaded != null ? uploaded.longitude.toStringAsFixed(6) : '—');
-    final accStr = position != null
-        ? '${position.accuracy.toStringAsFixed(1)} m'
-        : (uploaded != null ? '${uploaded.accuracy.toStringAsFixed(1)} m' : '—');
-
-    // Last updated timestamp: only show if an upload actually occurred
-    final lastUpdatedStr = uploaded != null
-        ? DateFormat('hh:mm a').format(uploaded.timestamp.toLocal())
+    final latStr = lat != null ? lat.toStringAsFixed(6) : '—';
+    final lngStr = lng != null ? lng.toStringAsFixed(6) : '—';
+    final accStr = acc != null ? '${acc.toStringAsFixed(1)} m' : '—';
+    final lastUpdatedStr = lastUpdated != null
+        ? DateFormat('hh:mm a').format(lastUpdated.toLocal())
         : '—';
 
     return Scaffold(
@@ -235,14 +146,49 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
               ),
               const SizedBox(height: 12),
 
-              // Active / Stopped Status Indicator Widget
+              // Active / Initializing Status Indicator
               StatusBadge(
                 isSharing: isSharing,
-                isUploading: _locationService.isUploading,
+                isUploading: false,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 20),
 
-              // Coordinates Details Card Widget
+              // Background Sharing Status Callout Card
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: isSharing ? const Color(0xFFECFDF5) : const Color(0xFFF1F5F9),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: isSharing ? const Color(0xFFA7F3D0) : const Color(0xFFCBD5E1),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      isSharing ? Icons.check_circle_outline : Icons.info_outline,
+                      color: isSharing ? const Color(0xFF059669) : const Color(0xFF64748B),
+                      size: 24,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        isSharing
+                            ? 'Your location is being shared in the background.'
+                            : 'Background location service is initializing...',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: isSharing ? const Color(0xFF065F46) : const Color(0xFF475569),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Coordinates Details Card
               CoordinateCard(
                 latitude: latStr,
                 longitude: lngStr,
@@ -250,6 +196,58 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
                 lastUpdated: lastUpdatedStr,
               ),
               const SizedBox(height: 16),
+
+              // Battery Optimization Warning Banner
+              if (isBatteryRestricted) ...[
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFFBEB),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFFDE68A)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.battery_alert, color: Color(0xFFD97706), size: 22),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Battery Optimization Active',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF92400E),
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Battery optimization may stop background location updates. Please allow unrestricted battery usage for reliable background location sharing.',
+                        style: TextStyle(color: Color(0xFF78350F), fontSize: 12),
+                      ),
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: OutlinedButton(
+                          onPressed: () => _locationService.requestIgnoreBatteryOptimization(),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF92400E),
+                            side: const BorderSide(color: Color(0xFFD97706)),
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                          ),
+                          child: const Text('Allow Unrestricted Battery'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
 
               // Offline / Error Banner
               if (uploadError != null) ...[
@@ -292,24 +290,27 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
                 const SizedBox(height: 16),
               ],
 
-              // Permission Warning Banner
-              if (permissionError != null && !isSharing) ...[
+              // Permission Warning Banner / Action
+              if (status == SharingStatus.permissionRequired) ...[
                 Container(
-                  padding: const EdgeInsets.all(14),
+                  padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFFFBEB),
+                    color: const Color(0xFFFEF3C7),
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFFDE68A)),
+                    border: Border.all(color: const Color(0xFFF59E0B)),
                   ),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.warning_amber_rounded, color: Color(0xFFD97706), size: 22),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          permissionError,
-                          style: const TextStyle(color: Color(0xFF92400E), fontSize: 12),
-                        ),
+                      Text(
+                        permissionError ?? 'Location access is required to share coordinates.',
+                        style: const TextStyle(color: Color(0xFF92400E), fontSize: 13),
+                      ),
+                      const SizedBox(height: 12),
+                      FilledButton(
+                        onPressed: () => _locationService.requestPermissionsAndStart(),
+                        style: FilledButton.styleFrom(backgroundColor: const Color(0xFFD97706)),
+                        child: const Text('Grant Location Permission'),
                       ),
                     ],
                   ),
@@ -317,58 +318,79 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
                 const SizedBox(height: 16),
               ],
 
-              const SizedBox(height: 8),
-
-              // START SHARING Button
-              FilledButton(
-                onPressed: isSharing ? null : _handleStartSharing,
-                style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  backgroundColor: const Color(0xFF0F766E),
-                  disabledBackgroundColor: const Color(0xFFCBD5E1),
-                  shape: RoundedRectangleBorder(
+              // Permanently Denied Banner
+              if (status == SharingStatus.permissionPermanentlyDenied) ...[
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF2F2),
                     borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFF87171)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Location permission is permanently denied.',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF991B1B),
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Please open Android App Settings and grant Location permissions to allow background sharing.',
+                        style: TextStyle(color: Color(0xFF7F1D1D), fontSize: 12),
+                      ),
+                      const SizedBox(height: 12),
+                      FilledButton(
+                        onPressed: () => _locationService.openAppSettings(),
+                        style: FilledButton.styleFrom(backgroundColor: const Color(0xFFDC2626)),
+                        child: const Text('Open App Settings'),
+                      ),
+                    ],
                   ),
                 ),
-                child: const Text(
-                  'START SHARING',
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.0,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
+                const SizedBox(height: 16),
+              ],
 
-              // STOP SHARING Button
-              OutlinedButton(
-                onPressed: isSharing ? _handleStopSharing : null,
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  foregroundColor: const Color(0xFFDC2626),
-                  side: BorderSide(
-                    color: isSharing ? const Color(0xFFDC2626) : const Color(0xFFCBD5E1),
-                    width: 1.5,
-                  ),
-                  shape: RoundedRectangleBorder(
+              // GPS Disabled Banner
+              if (status == SharingStatus.gpsDisabled) ...[
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF2F2),
                     borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFF87171)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Device Location (GPS) is turned off.',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF991B1B),
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      FilledButton(
+                        onPressed: () => _locationService.openLocationSettings(),
+                        style: FilledButton.styleFrom(backgroundColor: const Color(0xFFDC2626)),
+                        child: const Text('Turn On Device Location'),
+                      ),
+                    ],
                   ),
                 ),
-                child: const Text(
-                  'STOP SHARING',
-                  style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.0,
-                  ),
-                ),
-              ),
+                const SizedBox(height: 16),
+              ],
 
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
               Center(
                 child: Text(
-                  'Continuous Streaming: every ${AppConfig.updateIntervalSeconds}s • Server: ${AppConfig.baseUrl}',
+                  'Interval: ${AppConfig.updateIntervalMinutes} min • Server: ${AppConfig.baseUrl}',
                   style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
                 ),
               ),
