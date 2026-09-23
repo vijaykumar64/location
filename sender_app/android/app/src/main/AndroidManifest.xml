@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Permissions for Location Sharing & Persistent Foreground Service -->
+    <!-- Permissions for Native Android Location Sharing & Foreground Service -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -44,13 +44,26 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!-- Persistent Android Foreground Service from flutter_foreground_task -->
+        <!-- 100% Native Android Foreground Location Service (Survives Recent Apps Swipe-Out) -->
         <service
-            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="location"
+            android:name=".LocationForegroundService"
+            android:enabled="true"
+            android:exported="false"
             android:stopWithTask="false"
-            android:exported="false" />
+            android:foregroundServiceType="location" />
+
+        <!-- Boot Completed Receiver to restore location service after device reboot -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
+
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
          https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.

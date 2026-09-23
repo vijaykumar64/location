@@ -172,15 +172,30 @@ class _SenderScreenState extends State<SenderScreen> with WidgetsBindingObserver
                     ),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: Text(
-                        isSharing
-                            ? 'Your location is being shared in the background.'
-                            : 'Background location service is initializing...',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: isSharing ? const Color(0xFF065F46) : const Color(0xFF475569),
-                        ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isSharing
+                                ? 'Your location is being shared in the background.'
+                                : 'Background location service is initializing...',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: isSharing ? const Color(0xFF065F46) : const Color(0xFF475569),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            isSharing ? 'Background service: RUNNING' : 'Background service: STOPPED',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 0.5,
+                              color: isSharing ? const Color(0xFF047857) : const Color(0xFF64748B),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],

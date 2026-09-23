@@ -1,11 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import '../config/app_config.dart';
 import '../models/location_data.dart';
-import 'background_service.dart';
 
 enum SharingStatus {
   initializing,
@@ -16,6 +15,8 @@ enum SharingStatus {
 }
 
 class LocationService extends ChangeNotifier {
+  static const MethodChannel _channel = MethodChannel('com.locationsharing.sender/location_service');
+
   static final LocationService _instance = LocationService._internal();
   factory LocationService() => _instance;
   LocationService._internal();
@@ -58,24 +59,15 @@ class LocationService extends ChangeNotifier {
   bool _isBatteryOptimizationRestricted = false;
   bool get isBatteryOptimizationRestricted => _isBatteryOptimizationRestricted;
 
+  Timer? _uiRefreshTimer;
   StreamSubscription<ServiceStatus>? _serviceStatusSubscription;
 
   /// Initializes the service on app launch
   Future<void> initialize() async {
-    // 1. Load cached coordinates from local storage for instant display
-    final cached = await AppConfig.getLastLocation();
-    if (cached != null) {
-      _latitude = cached['latitude'];
-      _longitude = cached['longitude'];
-      _accuracy = cached['accuracy'];
-      _lastUpdated = cached['timestamp'];
-    }
+    // 1. Fetch latest coordinates recorded by native Android service
+    await fetchLatestLocationFromNative();
 
-    // 2. Register background isolate message receiver
-    FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
-    FlutterForegroundTask.addTaskDataCallback(_onReceiveTaskData);
-
-    // 3. Listen to device GPS hardware switch (on/off)
+    // 2. Listen to device GPS hardware switch (on/off)
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
       _serviceStatusSubscription?.cancel();
       _serviceStatusSubscription = Geolocator.getServiceStatusStream().listen((ServiceStatus status) {
@@ -90,51 +82,72 @@ class LocationService extends ChangeNotifier {
       });
     }
 
-    // 4. Check battery optimization state
+    // 3. Check battery optimization state on Android
     await checkBatteryOptimization();
 
-    // 5. Check permissions and auto-start if already granted
+    // 4. Check permissions and auto-start native service if already granted
     await checkAndAutoStart();
+
+    // 5. Start periodic refresh timer for UI updates while screen is active
+    _uiRefreshTimer?.cancel();
+    _uiRefreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      fetchLatestLocationFromNative();
+    });
   }
 
-  void _onReceiveTaskData(dynamic data) {
-    if (data is Map) {
-      debugPrint('[LocationService] Received data from background isolate: $data');
-      if (data['success'] == true) {
-        _latitude = (data['latitude'] as num?)?.toDouble() ?? _latitude;
-        _longitude = (data['longitude'] as num?)?.toDouble() ?? _longitude;
-        _accuracy = (data['accuracy'] as num?)?.toDouble() ?? _accuracy;
-        if (data['timestamp'] != null) {
-          _lastUpdated = DateTime.tryParse(data['timestamp'].toString()) ?? DateTime.now();
+  /// Queries the native Android service for the latest coordinates
+  Future<void> fetchLatestLocationFromNative() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final dynamic res = await _channel.invokeMethod('getLatestLocation');
+        if (res is Map) {
+          final lat = (res['latitude'] as num?)?.toDouble();
+          final lng = (res['longitude'] as num?)?.toDouble();
+          final acc = (res['accuracy'] as num?)?.toDouble();
+          final timeStr = res['timestamp']?.toString();
+
+          if (lat != null && lng != null && acc != null && timeStr != null) {
+            _latitude = lat;
+            _longitude = lng;
+            _accuracy = acc;
+            _lastUpdated = DateTime.tryParse(timeStr) ?? DateTime.now();
+            _uploadError = null;
+            notifyListeners();
+          }
         }
-        _uploadError = null;
-        _status = SharingStatus.active;
-      } else {
-        _uploadError = data['error']?.toString();
+      } catch (e) {
+        debugPrint('[LocationService] fetchLatestLocationFromNative error: $e');
       }
-      notifyListeners();
     }
   }
 
   /// Checks battery optimization status on Android
   Future<void> checkBatteryOptimization() async {
     if (!kIsWeb && Platform.isAndroid) {
-      final isIgnoring = await FlutterForegroundTask.isIgnoringBatteryOptimizations;
-      _isBatteryOptimizationRestricted = !isIgnoring;
-      notifyListeners();
+      try {
+        final bool isIgnored = await _channel.invokeMethod('isBatteryOptimizationIgnored') ?? false;
+        _isBatteryOptimizationRestricted = !isIgnored;
+        notifyListeners();
+      } catch (e) {
+        debugPrint('[LocationService] checkBatteryOptimization error: $e');
+      }
     }
   }
 
-  /// Requests user to whitelist app from aggressive battery optimizations
+  /// Prompts Android system battery optimization whitelist dialog
   Future<void> requestIgnoreBatteryOptimization() async {
     if (!kIsWeb && Platform.isAndroid) {
-      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
-      await Future.delayed(const Duration(seconds: 1));
-      await checkBatteryOptimization();
+      try {
+        await _channel.invokeMethod('requestIgnoreBatteryOptimization');
+        await Future.delayed(const Duration(seconds: 1));
+        await checkBatteryOptimization();
+      } catch (e) {
+        debugPrint('[LocationService] requestIgnoreBatteryOptimization error: $e');
+      }
     }
   }
 
-  /// Checks existing permissions and automatically starts/reconnects the foreground service
+  /// Checks permissions and automatically starts the native Android service if granted
   Future<void> checkAndAutoStart() async {
     _isGpsEnabled = await Geolocator.isLocationServiceEnabled();
     if (!_isGpsEnabled) {
@@ -147,9 +160,9 @@ class LocationService extends ChangeNotifier {
     final permission = await Geolocator.checkPermission();
 
     if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
-      // Permissions are already granted: DO NOT ask again!
+      // Permission already granted: DO NOT prompt again!
       _permissionError = null;
-      await _ensureForegroundServiceRunning();
+      await _ensureNativeServiceRunning();
       _status = SharingStatus.active;
       notifyListeners();
       return;
@@ -167,7 +180,7 @@ class LocationService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Performs first-time permission requests and automatically begins background sharing
+  /// First installation onboarding flow: requests permissions and starts the native Android service
   Future<bool> requestPermissionsAndStart() async {
     _isGpsEnabled = await Geolocator.isLocationServiceEnabled();
     if (!_isGpsEnabled) {
@@ -176,15 +189,6 @@ class LocationService extends ChangeNotifier {
       return false;
     }
 
-    // 1. Request Notification permission on Android 13+
-    if (!kIsWeb && Platform.isAndroid) {
-      final notifStatus = await FlutterForegroundTask.checkNotificationPermission();
-      if (notifStatus != NotificationPermission.granted) {
-        await FlutterForegroundTask.requestNotificationPermission();
-      }
-    }
-
-    // 2. Request Location Permission
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
@@ -204,87 +208,51 @@ class LocationService extends ChangeNotifier {
       return false;
     }
 
-    // 3. Mark setup completed so subsequent launches never prompt again
+    // Mark setup completed so future launches never prompt again
     await AppConfig.setLocationSetupCompleted(true);
 
-    // 4. Start foreground service
-    await _ensureForegroundServiceRunning();
+    // Start native Android Foreground Service
+    await _ensureNativeServiceRunning();
     _status = SharingStatus.active;
     _permissionError = null;
     notifyListeners();
 
-    // 5. Fetch first immediate coordinates
-    try {
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: Duration(seconds: 10),
-        ),
-      );
-      _latitude = pos.latitude;
-      _longitude = pos.longitude;
-      _accuracy = pos.accuracy;
-      _lastUpdated = DateTime.now();
-      await AppConfig.saveLastLocation(
-        latitude: pos.latitude,
-        longitude: pos.longitude,
-        accuracy: pos.accuracy,
-        timestamp: _lastUpdated!,
-      );
-      notifyListeners();
-    } catch (e) {
-      debugPrint('[LocationService] Initial position acquire error: $e');
-    }
-
+    // Fetch initial coordinates
+    await fetchLatestLocationFromNative();
     return true;
   }
 
-  /// Configures and starts the native Android Foreground Service
-  Future<void> _ensureForegroundServiceRunning() async {
-    final intervalMs = AppConfig.updateIntervalSeconds * 1000;
-
-    FlutterForegroundTask.init(
-      androidNotificationOptions: AndroidNotificationOptions(
-        channelId: 'location_sharing_channel',
-        channelName: 'Location Sharing Active',
-        channelDescription: 'Persistent background location sharing for Sender X',
-        channelImportance: NotificationChannelImportance.DEFAULT,
-        priority: NotificationPriority.DEFAULT,
-        enableVibration: false,
-        playSound: false,
-      ),
-      iosNotificationOptions: const IOSNotificationOptions(
-        showNotification: true,
-        playSound: false,
-      ),
-      foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.repeat(intervalMs),
-        autoRunOnBoot: true,
-        autoRunOnMyPackageReplaced: true,
-        allowWakeLock: true,
-        allowWifiLock: true,
-      ),
-    );
-
-    final isRunning = await FlutterForegroundTask.isRunningService;
-    if (!isRunning) {
-      debugPrint('[LocationService] Starting native Android ForegroundService with interval ${AppConfig.updateIntervalSeconds}s');
-      await FlutterForegroundTask.startService(
-        serviceId: 256,
-        notificationTitle: 'Location sharing is active',
-        notificationText: 'Your location is being shared in the background.',
-        callback: startCallback,
-      );
-    } else {
-      debugPrint('[LocationService] Foreground service already running; restarting with latest config...');
-      await FlutterForegroundTask.restartService();
+  /// Starts or confirms the native Android Foreground Service is running
+  Future<void> _ensureNativeServiceRunning() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final bool isRunning = await _channel.invokeMethod('isLocationServiceRunning') ?? false;
+        if (!isRunning) {
+          debugPrint('[LocationService] Starting native Android LocationForegroundService with interval ${AppConfig.updateIntervalSeconds}s');
+          await _channel.invokeMethod('startLocationService', {
+            'backend_url': AppConfig.locationApiUrl.replaceAll('/api/location', ''),
+            'interval_seconds': AppConfig.updateIntervalSeconds,
+          });
+        } else {
+          debugPrint('[LocationService] Native LocationForegroundService is already running.');
+        }
+      } catch (e) {
+        debugPrint('[LocationService] Error starting native location service: $e');
+      }
     }
   }
 
-  /// Restarts foreground service (e.g. after changing update interval)
+  /// Restarts the native Android service (e.g. after changing update interval or URL)
   Future<void> restartService() async {
-    if (_status == SharingStatus.active) {
-      await _ensureForegroundServiceRunning();
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        await _channel.invokeMethod('startLocationService', {
+          'backend_url': AppConfig.locationApiUrl.replaceAll('/api/location', ''),
+          'interval_seconds': AppConfig.updateIntervalSeconds,
+        });
+      } catch (e) {
+        debugPrint('[LocationService] restartService error: $e');
+      }
     }
   }
 
@@ -299,8 +267,8 @@ class LocationService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _uiRefreshTimer?.cancel();
     _serviceStatusSubscription?.cancel();
-    FlutterForegroundTask.removeTaskDataCallback(_onReceiveTaskData);
     super.dispose();
   }
 }
